@@ -29,76 +29,93 @@ func reverse(r []rune) string {
 
 const MAX_FILE_UPDATE_READ_RETRY = 5
 
-func checkFileForUpdates(file *os.File, websocketWaitChannel chan bool, dataChannel chan<- string, initialSeekOffset int64) {
-	fileUpdateReadRetryCount := 0
+func connectionHealthCheck(conn *websocket.Conn, doneChannel chan<- bool) {
 	for {
-		fmt.Println("initial seek offset:", initialSeekOffset)
-		if fileUpdateReadRetryCount >= MAX_FILE_UPDATE_READ_RETRY {
-			fmt.Println("[File Update Checker Goroutine] Max file update read retry count reached, giving up")
-			break
-		}
-
-		time.Sleep(5 * time.Second)
-		// 1. check for updates to the file every 1 second
-		latestFileSeekOffset, err := file.Seek(0, io.SeekEnd)
+		time.Sleep(3 * time.Second)
+		_, _, err := conn.ReadMessage()
 		if err != nil {
-			fmt.Println("Error seeking to end of file:", err)
-			break
+			fmt.Println("Error reading message from websocket:", err)
+			fmt.Println("Closing connection health check goroutine")
+			doneChannel <- true
+			return
 		}
-		offsetDiff := latestFileSeekOffset - initialSeekOffset
-		if offsetDiff <= 0 {
-			fmt.Println("No updates to the file")
-			continue
-		}
-		_, err = file.Seek(0-offsetDiff, io.SeekCurrent)
-		if err != nil {
-			fmt.Println("Error seeking to diff start of file:", err)
-			break
-		}
-		fmt.Println("File has been updated", offsetDiff, "bytes added")
-		currentSeekOffset := int64(0)
-		fileCharacterReadBuffer := make([]byte, 1)
-		addedLines := make([]string, 0)
-		currentLine := ""
-		for {
-			bytesRead, err := file.Read(fileCharacterReadBuffer)
-			if err == io.EOF {
-				fmt.Println("Reached end of file")
-				addedLines = append(addedLines, currentLine)
-				break
-			}
-			if err != nil {
-				fmt.Println("[File Update Checker Goroutine] Error reading file:", err)
-				fileUpdateReadRetryCount += 1
-				break
-			}
-			if bytesRead == 0 {
-				fmt.Println("Reached end of file")
-				break
-			}
-			letter := string(fileCharacterReadBuffer)
-			fmt.Println("Letter:", letter)
-			if letter == "\n" {
-				addedLines = append(addedLines, currentLine)
-				fmt.Println("Added line:", currentLine)
-				currentLine = ""
-			} else {
-				currentLine += letter
-			}
-			currentSeekOffset += 1
-		}
-		if len(addedLines) > 0 {
-			fmt.Println("Added", len(addedLines), "lines to the data channel")
-			fmt.Println("Lines:", addedLines)
-			for _, line := range addedLines {
-				dataChannel <- line
-			}
-		}
-		// make the initial seek offset the current seek offset
-		// so that the next time we check for updates, we start from the last (already) read position
-		initialSeekOffset = initialSeekOffset + currentSeekOffset
 	}
-	websocketWaitChannel <- true
+}
+
+func checkFileForUpdates(file *os.File, websocketWaitChannel chan bool, dataChannel chan<- string, initialSeekOffset int64, requestDoneChannel <-chan bool) {
+	fileUpdateReadRetryCount := 0
+	defer func() { websocketWaitChannel <- true }()
+	for {
+		select {
+		case <-time.After(10 * time.Second):
+			fmt.Println("Outer Time Ticker Fired")
+			if fileUpdateReadRetryCount >= MAX_FILE_UPDATE_READ_RETRY {
+				fmt.Println("[File Update Checker Goroutine] Max file update read retry count reached, giving up")
+				break
+			}
+
+			// seek to the end of the file
+			latestFileSeekOffset, err := file.Seek(0, io.SeekEnd)
+			if err != nil {
+				fmt.Println("Error seeking to end of file:", err)
+				break
+			}
+			// check for differences in the last read offsets
+			offsetDiff := latestFileSeekOffset - initialSeekOffset
+			if offsetDiff <= 0 {
+				fmt.Println("No updates to the file")
+				break
+			}
+			_, err = file.Seek(0-offsetDiff, io.SeekCurrent)
+			if err != nil {
+				fmt.Println("Error seeking to diff start of file:", err)
+				break
+			}
+			fmt.Println("File has been updated", offsetDiff, "bytes added")
+			currentSeekOffset := int64(0)
+			fileCharacterReadBuffer := make([]byte, 1)
+			addedLines := make([]string, 0)
+			currentLine := ""
+			for {
+				fmt.Println("Inner for loop running")
+				bytesRead, err := file.Read(fileCharacterReadBuffer)
+				if err == io.EOF {
+					fmt.Println("Reached end of file")
+					addedLines = append(addedLines, currentLine)
+					break
+				}
+				if err != nil {
+					fmt.Println("[File Update Checker Goroutine] Error reading file:", err)
+					fileUpdateReadRetryCount += 1
+					break
+				}
+				if bytesRead == 0 {
+					fmt.Println("Reached end of file")
+					break
+				}
+				letter := string(fileCharacterReadBuffer)
+				if letter == "\n" {
+					addedLines = append(addedLines, currentLine)
+					currentLine = ""
+				} else {
+					currentLine += letter
+				}
+				currentSeekOffset += 1
+			}
+			if len(addedLines) > 0 {
+				fmt.Println("Added", len(addedLines), "lines to the data channel")
+				for _, line := range addedLines {
+					dataChannel <- line
+				}
+			}
+			// make the initial seek offset the current seek offset
+			// so that the next time we check for updates, we start from the last (already) read position
+			initialSeekOffset = initialSeekOffset + currentSeekOffset
+		case <-requestDoneChannel:
+			fmt.Println("Request context done. Closing file update checker goroutine")
+			return
+		}
+	}
 }
 
 func main() {
@@ -122,7 +139,7 @@ func main() {
 		// open the log file
 		file, err := os.Open("tail.log")
 		if err != nil {
-			conn.WriteMessage(websocket.TextMessage, []byte("Error: Could not open file contents"))
+			conn.WriteJSON(map[string]string{"error": "Could not open file contents"})
 		}
 		defer file.Close()
 
@@ -131,7 +148,7 @@ func main() {
 		initialSeekOffset, err := file.Seek(int64(currentOffset), io.SeekEnd)
 		if err != nil {
 			fmt.Println("Error1:", err)
-			conn.WriteMessage(websocket.TextMessage, []byte("Error1: Could not read file contents"))
+			conn.WriteJSON(map[string]string{"error": "Could not read file contents"})
 			return
 		}
 
@@ -148,7 +165,7 @@ func main() {
 			bytesRead, err := file.Read(buffer)
 			if err != nil {
 				fmt.Println("Error2:", err)
-				conn.WriteMessage(websocket.TextMessage, []byte("Error2: Could not read file contents"))
+				conn.WriteJSON(map[string]string{"error": "Could not read file contents"})
 				return
 			}
 			if bytesRead == 0 {
@@ -163,9 +180,9 @@ func main() {
 				currentLineRunes := []rune(currentLine)
 				reversedLine := reverse(currentLineRunes)
 				if reversedLine == "" {
-					conn.WriteMessage(websocket.TextMessage, []byte("<empty line>"))
+					conn.WriteJSON(map[string]string{"line": "<empty line>"})
 				} else {
-					conn.WriteMessage(websocket.TextMessage, []byte(reversedLine))
+					conn.WriteJSON(map[string]string{"line": reversedLine})
 				}
 				currentLine = ""
 				currentLineCount += 1
@@ -176,17 +193,19 @@ func main() {
 				fmt.Println("Reached end of file")
 				currentLineRunes := []rune(currentLine)
 				reversedLine := reverse(currentLineRunes)
-				conn.WriteMessage(websocket.TextMessage, []byte(reversedLine))
+				conn.WriteJSON(map[string]string{"line": reversedLine})
 				break
 			}
 		}
 		websocketWaitChannel := make(chan bool)
 		realtimeUpdateChannel := make(chan string)
-		go checkFileForUpdates(file, websocketWaitChannel, realtimeUpdateChannel, initialSeekOffset+1)
+		doneChannel := make(chan bool)
+		go connectionHealthCheck(conn, doneChannel)
+		go checkFileForUpdates(file, websocketWaitChannel, realtimeUpdateChannel, initialSeekOffset+1, doneChannel)
 		for {
 			select {
 			case newLine := <-realtimeUpdateChannel:
-				conn.WriteMessage(websocket.TextMessage, []byte(newLine))
+				conn.WriteJSON(map[string]string{"line": newLine})
 			case <-websocketWaitChannel:
 				fmt.Println("Error with file reading operations. Closing websocket connection, exiting handler parent goroutine")
 				return

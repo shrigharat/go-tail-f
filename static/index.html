@@ -61,13 +61,19 @@
     };
 
     ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.error) {
+        printLine(msg.error, "system");
+        return;
+      }
+      const text = msg.line ?? "";
       if (isHistorical) {
         clearTimeout(flushTimer);
-        historicalBuffer.push(event.data);
+        historicalBuffer.push(text);
         // historical lines arrive in a tight burst; realtime lines come ≥5s apart
         flushTimer = setTimeout(flushHistorical, 500);
       } else {
-        printLine(event.data);
+        printLine(text);
       }
     };
 
