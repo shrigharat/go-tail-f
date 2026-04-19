@@ -39,19 +39,36 @@
       div.className = "line " + className;
       div.textContent = message;
       terminal.appendChild(div);
-
-      // Auto-scroll to bottom
       terminal.scrollTop = terminal.scrollHeight;
     }
 
     const ws = new WebSocket("ws://localhost:8000/ws");
+
+    // Buffer historical lines (sent newest-first) until the burst ends,
+    // then flush them reversed so oldest appears first.
+    let historicalBuffer = [];
+    let isHistorical = true;
+    let flushTimer = null;
+
+    function flushHistorical() {
+      isHistorical = false;
+      historicalBuffer.reverse().forEach(msg => printLine(msg));
+      historicalBuffer = [];
+    }
 
     ws.onopen = () => {
       printLine("Connected to WebSocket", "system");
     };
 
     ws.onmessage = (event) => {
-      printLine(event.data);
+      if (isHistorical) {
+        clearTimeout(flushTimer);
+        historicalBuffer.push(event.data);
+        // historical lines arrive in a tight burst; realtime lines come ≥5s apart
+        flushTimer = setTimeout(flushHistorical, 500);
+      } else {
+        printLine(event.data);
+      }
     };
 
     ws.onerror = (error) => {
