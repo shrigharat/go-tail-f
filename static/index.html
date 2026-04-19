@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>WebSocket Terminal</title>
+  <style>
+    body {
+      margin: 0;
+      background: #000;
+      color: #00ff00;
+      font-family: monospace;
+    }
+
+    #terminal {
+      padding: 16px;
+      height: 100vh;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+
+    .line::before {
+      content: "> ";
+      color: #00ff00;
+    }
+
+    .system {
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+  <div id="terminal"></div>
+
+  <script>
+    const terminal = document.getElementById("terminal");
+
+    function printLine(message, className = "") {
+      const div = document.createElement("div");
+      div.className = "line " + className;
+      div.textContent = message;
+      terminal.appendChild(div);
+
+      // Auto-scroll to bottom
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    const ws = new WebSocket("ws://localhost:8000/ws");
+
+    ws.onopen = () => {
+      printLine("Connected to WebSocket", "system");
+    };
+
+    ws.onmessage = (event) => {
+      printLine(event.data);
+    };
+
+    ws.onerror = (error) => {
+      printLine("Error occurred", "system");
+      console.error(error);
+    };
+
+    ws.onclose = () => {
+      printLine("Connection closed", "system");
+    };
+  </script>
+</body>
+</html>
